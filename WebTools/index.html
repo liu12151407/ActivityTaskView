@@ -1,0 +1,244 @@
+<!-- HTML -->
+<!DOCTYPE html>
+<html>
+<head>
+  <style>
+      body {
+        background-color: #333;
+        color: #f3f3f3;
+      }
+    ul {
+      list-style-type: none; /* 移除默认的列表标记 */
+      padding: 0;
+      margin: 0;
+    }
+
+    ul ul {
+      margin-left: 20px; /* 添加左边距来表示层级 */
+    }
+
+    li {
+      position: relative; /* 使伪元素定位相对于li元素 */
+      padding-left: 10px; /* 添加左边内边距 */
+    }
+
+    li::before {
+      content: ""; /* 伪元素的内容 */
+      position: absolute; /* 绝对定位 */
+      top: 0; /* 从顶部开始 */
+      left: 0; /* 在左边 */
+      width: 10px; /* 宽度 */
+      height: 100%; /* 高度 */
+      border-left: 1px solid #aaa; /* 添加左边边框 */
+    }
+    li::after {
+      content: ""; /* 伪元素的内容 */
+      position: absolute; /* 绝对定位 */
+      top: 10px; /* 从顶部开始 */
+      left: 0px; /* 在左边 */
+      width: 10px; /* 宽度 */
+      height: 1px; /* 高度 */
+      background-color: #aaa; /* 添加背景色 */
+    }
+  </style>
+</head>
+<body>
+  <ul id="view"></ul>
+  <script>
+    var socket = new WebSocket('ws://localhost:3000');
+
+    var dataQueue = []; // Create a queue to store events
+    var isProcessing = false; // Flag to indicate whether an event is being processed
+
+    const DELAY = 100; // Delay time in ms to process the next event
+
+    const TAG = "ActivityTaskView.atv: "
+
+    socket.onmessage = function(event) {
+      // log(event.data)
+      var arr = event.data.split("\n");
+      for(var i = 0; i < arr.length; i++) {
+        var data = arr[i];
+        if (data.includes(TAG)) {
+          dataQueue.push(data);
+        } else {
+          log("invalid data: " + data)
+        }
+      }
+      try {
+        processEvent()
+      } catch (e) {
+        isProcessing = false
+        log(e)
+      }
+    };
+
+    function processEvent() {
+      if (isProcessing || dataQueue.length == 0) {
+        // If an event is being processed, or the queue is empty, then return directly
+        return;
+      }
+
+      isProcessing = true; // Mark that an event is being processed
+      var data = dataQueue.shift(); // Take out an event from the queue
+
+      if (data instanceof HTMLLIElement) {
+        var li = data // activity destroy or fragment detach
+
+        var isActivity = li.children[0].textContent.endsWith('Destroyed')
+        var isActivityWaitFragment = false
+        // DemoFragmentActivity@0xb49418a onActivityDestroyed 
+        // DemoFragmentActivity@0xb49418a onFragmentViewDestroyed [DemoFragment@0x8ad32bf]
+        // DemoFragmentActivity@0xb49418a onFragmentDestroyed [DemoFragment@0x8ad32bf]
+        // DemoFragmentActivity@0xb49418a onFragmentDetached [DemoFragment@0x8ad32bf]
+
+        if (isActivity && dataQueue.length > 0 && !(dataQueue[0] instanceof String)) {
+          var next = dataQueue[0]
+          var [task, lifecycle] = parseData(next)
+          // log("checkWait " + li.id + " " + task.next.value)
+          if (li.id == task.next.value) {
+            isActivityWaitFragment = true
+            dataQueue.shift() // next
+            dataQueue.unshift(li)
+            var ul = document.getElementById("view");
+            handleLifecycle(ul, task, lifecycle);
+          }
+        }
+        if (!isActivityWaitFragment) {
+          var ul = li.parentElement
+          li.remove()
+          if (isActivity && ul.children.length == 0) {
+            dataQueue.unshift(ul.parentElement) // delay remove task li
+          }
+        }
+      } else {
+        var ul = document.getElementById("view");
+        var [task, lifecycle] = parseData(data)
+        handleLifecycle(ul, task, lifecycle);
+      }
+
+      setTimeout(function() {
+        isProcessing = false; // Mark that the event processing has been completed
+        try {
+          processEvent()
+        } catch (e) {
+          isProcessing = false
+          log(e)
+        }
+      }, DELAY);
+    }
+
+    function parseData(data) {
+      log("parse: " + data);
+      var data = data.split(TAG)[1];
+      var s = data.split(" ");
+      var task = s[0];
+      var activity = s[1];
+      var lifecycle = s[2];
+
+      var t = new ListNode(task);
+      var a = new ListNode(activity);
+      t.next = a;
+
+      if (s.length > 3) {
+        var fragments = s[3].slice(1, -1).split(",");
+        for (var i = fragments.length - 1; i >= 0; i--) {
+          a.next = new ListNode(fragments[i]);
+          a = a.next;
+        }
+      }
+      return [t, lifecycle];
+    }
+
+    class ListNode {
+      constructor(value, next = null) {
+        this.value = value;
+        this.next = next;
+      }
+    }
+
+    function findChild(ul, id) {
+      var children = ul.children
+      for (var i = 0; i < children.length; i++) {
+        if (children[i].id == id) {
+          return children[i]
+        }
+      }
+      return null
+    }
+
+    function log(msg) {
+      console.log(msg)
+    }
+
+    function setText(li, name, lifecycle) {
+      // log(name + " " + lifecycle)
+      name = name.split("@")[0]
+      lifecycle = lifecycle.replace("onActivity", "").replace("onFragment", "")
+      var div = li.children[0]
+      if (div == null) {
+        div = document.createElement("div")
+        li.appendChild(div)
+      }
+      var span0 = div.children[0]
+      if (span0 == null) {
+        span0 = document.createElement("span")
+        div.appendChild(span0)
+      }
+      var span1 = div.children[1]
+      if (span1 == null) {
+        span1 = document.createElement("span")
+        div.appendChild(span1)
+      }
+      span0.textContent = name
+      span1.textContent = " " + lifecycle
+      span1.style.color = findColor(lifecycle)
+      span1.style.fontSize = 'smaller'
+    }
+
+    function findColor(lifecycle) {
+      var c = "LightGray"
+      if (lifecycle.endsWith('Created') || lifecycle.endsWith('Started') || lifecycle.endsWith('Attached')) {
+        c = "orange"
+      } else if (lifecycle.endsWith('Resumed')) {
+        c = "red"
+      } else if (lifecycle.endsWith('Paused')) {
+        c = "green"
+      } else if (lifecycle.endsWith('Destroyed') || lifecycle.endsWith('Detached')) {
+        c = "gray"
+      }
+      return c
+    }
+
+    function handleLifecycle(ul, head, lifecycle) {
+      var li = findChild(ul, head.value)
+      if (li == null) {
+        li = document.createElement("li")
+        li.id = head.value
+        setText(li, head.value, "")
+        ul.appendChild(li)
+      }
+
+      if (head.next != null && head.next.value != null && head.next.value != "") {
+        // head.next is null but head.next = object, object.value = ""
+        var ull = li.children[1]
+        if (ull != null) {
+          // no op
+        } else {
+          ull = document.createElement("ul")
+          li.appendChild(ull)
+        }
+        handleLifecycle(ull, head.next, lifecycle)
+      } else { // update current lifecycle or remove
+        setText(li, head.value, lifecycle)
+
+        if (lifecycle.endsWith('ActivityDestroyed') || lifecycle.endsWith('Detached')) {
+          // li.remove();
+          dataQueue.unshift(li)
+        }
+      }
+    }
+
+  </script>
+</body>
+</html>
